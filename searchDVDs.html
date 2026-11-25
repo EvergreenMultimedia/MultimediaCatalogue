@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DVD Search</title>
+<style>
+  :root {
+    --bg: #f7f7f8; --card: #ffffff; --text: #1a1a1a; --muted: #6b6b6b;
+    --accent: #2f6f4f; --accent-dark: #234f38; --border: #e0e0e0;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg); color: var(--text); padding: 16px;
+    max-width: 900px; margin: 0 auto;
+  }
+  h1 { font-size: 20px; margin: 8px 0 4px; }
+  p.subtitle { color: var(--muted); margin: 0 0 16px; font-size: 14px; line-height: 1.4; }
+  .card {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 4px; margin-top: 10px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], select {
+    width: 100%; padding: 10px; font-size: 15px; border: 1px solid var(--border);
+    border-radius: 8px; background: #fff; font-family: inherit;
+  }
+  .filter-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 0 12px;
+  }
+  @media (max-width: 480px) {
+    .filter-grid { grid-template-columns: 1fr; }
+  }
+  button {
+    font-size: 14px; padding: 9px 14px; border-radius: 8px; border: none;
+    cursor: pointer; margin-top: 12px;
+  }
+  button.link { background: none; color: var(--accent); text-decoration: underline; padding: 4px 0; margin-top: 8px; }
+  .status { font-size: 14px; color: var(--muted); margin: 4px 0 12px; }
+  .error { color: #b3261e; font-size: 14px; margin: 8px 0; }
+  .hidden { display: none; }
+  .results { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  @media (max-width: 640px) {
+    .results { grid-template-columns: 1fr; }
+  }
+  .item {
+    background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px 14px;
+  }
+  .item h3 { margin: 0 0 6px; font-size: 15px; }
+  .item .meta { font-size: 13px; color: var(--muted); margin: 2px 0; }
+  .item .desc { font-size: 13px; line-height: 1.45; margin: 8px 0 0; }
+  .item .location { font-size: 13px; color: var(--accent-dark); font-weight: 600; margin-top: 8px; }
+  .empty { color: var(--muted); font-size: 14px; padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+
+<h1>DVD Search</h1>
+<p class="subtitle">Search the library's DVDs — no login needed.</p>
+
+<div class="card">
+  <label for="titleSearch">Title contains</label>
+  <input type="text" id="titleSearch" placeholder="e.g. matrix" autocomplete="off">
+
+  <div class="filter-grid">
+    <div>
+      <label for="kindFilter">Film or series</label>
+      <select id="kindFilter"><option value="">All DVDs</option></select>
+    </div>
+    <div>
+      <label for="genreFilter">Genre</label>
+      <select id="genreFilter"><option value="">Any genre</option></select>
+    </div>
+    <div>
+      <label for="yearFilter">Year</label>
+      <select id="yearFilter"><option value="">Any year</option></select>
+    </div>
+    <div>
+      <label for="directorFilter">Director or actor</label>
+      <select id="directorFilter"><option value="">Anyone</option></select>
+    </div>
+  </div>
+
+  <button class="link" onclick="clearFilters()">Clear all filters</button>
+</div>
+
+<p class="status" id="resultsSummary">Loading…</p>
+<div id="errorBox" class="error hidden"></div>
+<div id="results" class="results"></div>
+
+<script>
+// ---------------------------------------------------------------------
+// SETUP: reads the MultiMedia-catalog-copies Google Sheet (the DVD/CD
+// export from Librarika). The sheet must be shared as
+// "Anyone with the link — Viewer".
+// SHEET_ID is the long string in the sheet's address between /d/ and
+// /edit; SHEET_GID is the number after gid= for the DVD tab.
+// To refresh: export from Librarika again and paste over the sheet.
+// ---------------------------------------------------------------------
+// const SHEET_ID = '1Di95p_ciBBe-hYnhUuxpaXuQAaVSy97Yi-tXOkpVUqk';
+const SHEET_ID = '191roM0qGEHPViZHrHIFekTzDD-R0-JNVJmIOsEBL4nQ';
+const SHEET_GID = '0';
+
+let allItems = [];
+
+function $(id) { return document.getElementById(id); }
+
+function splitMulti(value) {
+  return String(value || '')
+    .split(';')
+    .map(function (s) { return s.trim(); })
+    .filter(function (s) { return s.length > 0; });
+}
+
+// Minimal but complete CSV parser (handles quotes, commas and line
+// breaks inside descriptions).
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ',') { row.push(field); field = ''; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+    else if (c !== '\r') field += c;
+  }
+  if (field !== '' || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+async function init() {
+  try {
+    const url = 'https://docs.google.com/spreadsheets/d/' + SHEET_ID +
+                '/gviz/tq?tqx=out:csv&headers=1&gid=' + SHEET_GID;
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const text = await resp.text();
+    if (text.trim().charAt(0) === '<') {
+      showError('The sheet is not shared publicly. In Google Sheets choose Share → General access → "Anyone with the link" → Viewer.');
+      return;
+    }
+    const rows = parseCSV(text);
+    const headers = (rows.shift() || []).map(function (h) { return h.trim(); });
+    allItems = rows
+      .map(function (r) {
+        const o = {};
+        headers.forEach(function (h, i) { o[h] = String(r[i] || '').trim(); });
+        // Sheets may hand back 2023 as "2023.0".
+        o['Year'] = o['Year'] ? o['Year'].replace(/\.0+$/, '') : '';
+        return o;
+      })
+      .filter(function (o) {
+        // Skip blank rows, items marked inactive (withdrawn/lost), and
+        // anything whose Category isn't DVD (the same sheet holds the CDs).
+        return o['Title'] && String(o['Is Active'] || '').toLowerCase() !== 'no' &&
+          (!headers.includes('Category') || /dvd/i.test(o['Category']));
+      })
+      .sort(function (a, b) {
+        const key = function (t) { return t.toLowerCase().replace(/^(the|a|an) /, ''); };
+        return key(a['Title']).localeCompare(key(b['Title']));
+      });
+    render();
+  } catch (err) {
+    showError('Could not load the DVD catalogue — check your connection and reload.');
+  }
+
+  ['input', 'change'].forEach(function (evt) {
+    $('titleSearch').addEventListener(evt, render);
+    $('kindFilter').addEventListener(evt, render);
+    $('genreFilter').addEventListener(evt, render);
+    $('yearFilter').addEventListener(evt, render);
+    $('directorFilter').addEventListener(evt, render);
+  });
+}
+
+function showError(msg) {
+  $('errorBox').textContent = msg;
+  $('errorBox').classList.remove('hidden');
+  $('resultsSummary').textContent = '';
+}
+
+// Does this item satisfy filter set f? Any field left as '' in f is not
+// constrained. f: { text, kind, genre, year, director }
+// kind comes from the Location column (Film DVDs, Series DVDs, and any
+// new shelf such as Documentary DVDs appears automatically).
+// Librarika's export puts director AND cast together in Authors (Co-authors
+// comes out empty), so one "Director or actor" filter covers both.
+function itemMatches(item, f) {
+  if (f.text && !String(item['Title'] || '').toLowerCase().includes(f.text)) return false;
+  if (f.kind && item['Location'] !== f.kind) return false;
+  if (f.genre && splitMulti(item['Subject']).indexOf(f.genre) === -1) return false;
+  if (f.year && String(item['Year']) !== f.year) return false;
+  if (f.director && splitMulti(item['Authors']).indexOf(f.director) === -1) return false;
+  return true;
+}
+
+// The values available for one dropdown, given the CURRENT state of every
+// OTHER filter (not this one's own selection) — this is what makes the
+// filters progressive: picking a genre narrows what shows up in the
+// director/actor/year dropdowns, and vice versa.
+function optionsFor(field, raw) {
+  const relaxed = Object.assign({}, raw);
+  relaxed[field] = ''; // this field itself is unconstrained while computing its own options
+  const subset = allItems.filter(function (item) { return itemMatches(item, relaxed); });
+  const values = new Set();
+  subset.forEach(function (item) {
+    if (field === 'kind') { if (item['Location']) values.add(item['Location']); }
+    else if (field === 'genre') splitMulti(item['Subject']).forEach(function (v) { values.add(v); });
+    else if (field === 'director') splitMulti(item['Authors']).forEach(function (v) { values.add(v); });
+    else if (field === 'year') { if (item['Year']) values.add(String(item['Year'])); }
+  });
+  return Array.from(values);
+}
+
+function rebuildSelect(id, anyLabel, values, selectedValue) {
+  const sel = $(id);
+  sel.innerHTML = '';
+  const anyOpt = document.createElement('option');
+  anyOpt.value = '';
+  anyOpt.textContent = anyLabel;
+  sel.appendChild(anyOpt);
+  values.forEach(function (v) {
+    const opt = document.createElement('option');
+    opt.value = v;
+    opt.textContent = v;
+    sel.appendChild(opt);
+  });
+  sel.value = selectedValue; // if selectedValue isn't among the options, this leaves "" (Any) selected
+}
+
+function clearFilters() {
+  $('titleSearch').value = '';
+  $('kindFilter').value = '';
+  $('genreFilter').value = '';
+  $('yearFilter').value = '';
+  $('directorFilter').value = '';
+  render();
+}
+
+function render() {
+  const raw = {
+    text: $('titleSearch').value.trim().toLowerCase(),
+    kind: $('kindFilter').value,
+    genre: $('genreFilter').value,
+    year: $('yearFilter').value,
+    director: $('directorFilter').value
+  };
+
+  // Recompute each dropdown's own option list from the other active filters.
+  const kindOptions = optionsFor('kind', raw).sort();
+  const genreOptions = optionsFor('genre', raw).sort();
+  const yearOptions = optionsFor('year', raw).sort().reverse();
+  const directorOptions = optionsFor('director', raw).sort();
+
+  // If a selection is no longer possible given the other filters (e.g. a
+  // previously-picked director has no titles left once a genre is chosen),
+  // drop it back to "Any" rather than silently filtering to zero results.
+  const kept = {
+    text: raw.text,
+    kind: kindOptions.indexOf(raw.kind) !== -1 ? raw.kind : '',
+    genre: genreOptions.indexOf(raw.genre) !== -1 ? raw.genre : '',
+    year: yearOptions.indexOf(raw.year) !== -1 ? raw.year : '',
+    director: directorOptions.indexOf(raw.director) !== -1 ? raw.director : ''
+  };
+
+  rebuildSelect('kindFilter', 'All DVDs', kindOptions, kept.kind);
+  rebuildSelect('genreFilter', 'Any genre', genreOptions, kept.genre);
+  rebuildSelect('yearFilter', 'Any year', yearOptions, kept.year);
+  rebuildSelect('directorFilter', 'Anyone', directorOptions, kept.director);
+
+  const matches = allItems.filter(function (item) { return itemMatches(item, kept); });
+
+  $('resultsSummary').textContent = allItems.length === 0
+    ? 'No DVDs catalogued yet.'
+    : matches.length + ' of ' + allItems.length + ' DVDs shown.';
+
+  const container = $('results');
+  container.innerHTML = '';
+  if (matches.length === 0 && allItems.length > 0) {
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = 'No matches — try clearing a filter.';
+    container.appendChild(empty);
+    return;
+  }
+
+  matches.forEach(function (item) {
+    container.appendChild(renderItem(item));
+  });
+}
+
+function renderItem(item) {
+  const div = document.createElement('div');
+  div.className = 'item';
+
+  const h3 = document.createElement('h3');
+  h3.textContent = item['Title'] || '(untitled)';
+  div.appendChild(h3);
+
+  const lines = [
+    ['Director & cast', item['Authors']],
+    ['Genre', item['Subject']],
+    ['Year', item['Year']],
+    ['Studio', item['Publisher']]
+  ];
+  lines.forEach(function (pair) {
+    if (!pair[1]) return;
+    const p = document.createElement('div');
+    p.className = 'meta';
+    p.textContent = pair[0] + ': ' + pair[1];
+    div.appendChild(p);
+  });
+
+  if (item['Description']) {
+    const d = document.createElement('div');
+    d.className = 'desc';
+    d.textContent = item['Description'];
+    div.appendChild(d);
+  }
+
+  if (item['Location']) {
+    const loc = document.createElement('div');
+    loc.className = 'location';
+    loc.textContent = '📍 ' + item['Location'];
+    div.appendChild(loc);
+  }
+
+  return div;
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>
